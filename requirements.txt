@@ -1,0 +1,12 @@
+torch-cluster==1.5.7
+torch-scatter==2.0.5
+torch-sparse==0.6.7
+torch-spline-conv==1.2.0
+torch_geometric==1.6.1
+torch==1.6.0
+matplotlib==2.2.3
+networkx==2.4
+dgl==0.4.3.post2
+numpy==1.16.6
+scipy==1.4.1
+scikit-learn==0.21.3

@@ -1,0 +1,413 @@
+#!/usr/bin/env python 
+# -*- coding: utf-8 -*-
+# @Time    : 2020/8/5 10:08
+# @Author  : Raymound luo
+# @Mail    : luolinhao1998@gmail.com
+# @File    : preprocess.py
+# @Software: PyCharm
+# @Describe:
+import dgl
+import numpy as np
+import os
+import pickle
+
+import torch
+from scipy.sparse import coo_matrix
+from scipy import io as sio
+from sklearn.model_selection import train_test_split
+
+
+class GraphDataLoader(object):
+    def __init__(self, data_config, remove_self_loop):
+        self.data_config = data_config
+        self.data_path = os.path.join(data_config['data_path'], data_config['dataset'], data_config['data_name'])
+        self.train_data_path = os.path.join(data_config['data_path'], data_config['dataset'], 'train_data')
+
+    def load_raw_matrix(self):
+        raise NotImplementedError("Not Implement load_raw_matrix")
+
+    def load_k_hop_train_data(self):
+        raise NotImplementedError("Not Implement load_k_hop_train_data method")
+
+    def load_classification_data(self):
+        raise NotImplementedError("Not Implement load_classification_data method")
+
+    def load_links_prediction_data(self):
+        raise NotImplementedError("Not Implement load_links_prediction_data method")
+
+    def k_hop_neighbor(self, g, K, primary_type):
+        '''
+        Return the K hop neighbors of primary graph
+        :param g: DGLHeteroGraph
+        :param K: K hop neighbors
+        :param primary_type:
+        :return: graph_dict (l-hop, l-hop neighbors graph) l in [0, K+1]
+        '''
+        ntype = g.ntypes
+        primary_type_id = ntype.index(primary_type)
+        graph_dict = {}
+
+        def set_attribute(x, y):
+            for key, value in y.items():
+                x[key] = value
+
+        def get_primary_subgraph(g, primary_type_id):
+            '''
+            Return primary l-hop neighbor graph from homogeneous graph
+            :param g: DGLHeteroGraph
+            :param primary_type_id:
+            :return: g: primary subgraph DGLGraph
+            '''
+            primary_edges = g.filter_edges(
+                lambda edges: (
+                    torch.logical_and((edges.src['_TYPE'] == primary_type_id),
+                                      (edges.dst['_TYPE'] == primary_type_id))))  # Filter edges
+            src_nodes, dst_nodes = g.find_edges(primary_edges)  # Find src and dst nodes
+            # Change the nodes' id to local graph id
+            min_p = torch.min(torch.cat([src_nodes, dst_nodes]))
+            src = src_nodes - min_p
+            dst = dst_nodes - min_p
+            g = dgl.DGLGraph((src, dst), readonly=True)
+            return g
+
+        homo_g = dgl.to_homo(g)
+        raw_adj = homo_g.adj(scipy_fmt='csr')
+        adj_k = 1
+        for l in range(K + 1):
+            print("Prcessing {} hop neighbors graph...".format(l))
+            adj_k = adj_k * raw_adj
+            new_g = dgl.graph(adj_k)
+            set_attribute(new_g.ndata,
+                          homo_g.ndata)  # Set attributes for all the node, node.data['_TYPE]= node type in HIN
+            g = get_primary_subgraph(new_g, primary_type_id)  #
+            graph_dict[l] = g
+        return graph_dict
+
+
+class ACMDataLoader(GraphDataLoader):
+    def __init__(self, data_config, remote_self_loop):
+        super(ACMDataLoader, self).__init__(data_config, remote_self_loop)
+
+        self.heter_graph, self.raw_matrix = self.load_raw_matrix()
+
+    def load_raw_matrix(self):
+        data = sio.loadmat(self.data_path)
+        '''
+        ['__header__', '__version__', '__globals__', 'TvsP', 'PvsA', 'PvsV', 'AvsF', 'VvsC', 'PvsL', 'PvsC', 'A', 'C', 'F', 'L', 'P', 'T', 'V', 'PvsT', 'CNormPvsA', 'RNormPvsA', 'CNormPvsC', 'RNormPvsC', 'CNormPvsT', 'RNormPvsT', 'CNormPvsV', 'RNormPvsV', 'CNormVvsC', 'RNormVvsC', 'CNormAvsF', 'RNormAvsF', 'CNormPvsL', 'RNormPvsL', 'stopwords', 'nPvsT', 'nT', 'CNormnPvsT', 'RNormnPvsT', 'nnPvsT', 'nnT', 'CNormnnPvsT', 'RNormnnPvsT', 'PvsP', 'CNormPvsP', 'RNormPvsP']
+        P: Paper
+        A：Author
+        F: Facility
+        C: Conference
+        L: Subject
+        '''
+        p_vs_l = data['PvsL']  # paper-Subject
+        p_vs_p = data['PvsP']  # paper-paper
+        p_vs_a = data['PvsA']  # paper-author
+        a_vs_f = data['AvsF']  # author-facility
+
+        hg = dgl.heterograph({
+            ('p', 'pa', 'a'): p_vs_a,
+            ('a', 'ap', 'p'): p_vs_a.transpose(),
+            ('p', 'pp', 'p'): p_vs_p,
+            ('p', 'ps', 's'): p_vs_l,
+            ('s', 'sp', 'p'): p_vs_l.transpose(),
+            ('a', 'af', 'f'): a_vs_f,
+            ('f', 'fa', 'a'): a_vs_f.transpose(),
+        })
+
+        return hg, data
+
+    def load_classification_data(self):
+        task_data_path = os.path.join(self.data_config['data_path'], self.data_config['dataset'], 'CF',
+                                      'data.pkl')
+        if self.data_config['resample'] or not os.path.exists(task_data_path):
+            # We assign
+            # (1) KDD papers as class 0 (data mining),
+            # (2) SIGMOD and VLDB papers as class 1 (database),
+            # (3) SIGCOMM and MOBICOMM papers as class 2 (communication)
+            conf_ids = [0, 1, 9, 10, 13]
+            label_ids = [0, 1, 2, 2, 1]
+
+            p_vs_t = self.raw_matrix['PvsT']  # paper-term, bag of words, used for feature
+            p_vs_c = self.raw_matrix['PvsC']  # paper-conference, labels come from that
+
+            p_selected = p_vs_c[:, conf_ids].tocoo().row
+
+            features = torch.FloatTensor(p_vs_t.toarray())  # Feature
+
+            labels = p_vs_c.indices
+            for conf_id, label_id in zip(conf_ids, label_ids):
+                labels[label_ids == conf_id] = label_id
+            labels = torch.LongTensor(labels)
+
+            num_classes = 3
+
+            train_idx, test_idx = train_test_split(p_selected, test_size=self.data_config['test_ratio'],
+                                                   random_state=self.data_config['random_seed'])
+            train_idx = torch.LongTensor(train_idx)
+            test_idx = torch.LongTensor(test_idx)
+            with open(task_data_path, 'wb') as f:
+                pickle.dump([features, labels, num_classes, train_idx, test_idx], f)
+
+        else:
+            with open(task_data_path, 'rb') as f:
+                features, labels, num_classes, train_idx, test_idx = pickle.load(f)
+
+        return features, labels, num_classes, train_idx, test_idx
+
+    def load_links_prediction_data(self):
+        task_data_path = os.path.join(self.data_config['data_path'], self.data_config['dataset'], 'LP',
+                                      'data.pkl')
+        if self.data_config['resample'] or not os.path.exists(task_data_path):
+            primary_graph = self.heter_graph.node_type_subgraph(self.data_config['primary_type'])
+            g = dgl.DGLGraph(primary_graph.to_networkx(), readonly=True)
+            edgesampler = dgl.contrib.sampling.EdgeSampler(g, batch_size=g.number_of_edges(), num_workers=8,
+                                                           negative_mode='tail',
+                                                           neg_sample_size=1, exclude_positive=True)
+            src_data = []
+            dst_data = []
+            labels = []
+            for pos_g, neg_g in edgesampler:
+                pos_edges = pos_g.edges()
+                neg_edges = neg_g.edges()
+                src_data.extend(pos_edges[0].tolist())
+                dst_data.extend(pos_edges[1].tolist())
+                labels.extend([1] * len(pos_edges[0]))
+
+                src_data.extend(neg_edges[0].tolist())
+                dst_data.extend(neg_edges[1].tolist())
+                labels.extend([0] * len(neg_edges[0]))
+                break
+
+            src_train, src_test, dst_train, dst_test, labels_train, labels_test = train_test_split(src_data, dst_data,
+                                                                                                   labels,
+                                                                                                   test_size=
+                                                                                                   self.data_config[
+                                                                                                       'test_ratio'],
+                                                                                                   random_state=
+                                                                                                   self.data_config[
+                                                                                                       'random_seed'])
+            p_vs_t = self.raw_matrix['PvsT']  # paper-term, bag of words, used for feature
+            features = torch.FloatTensor(p_vs_t.toarray())  # Feature
+            src_train = torch.LongTensor(src_train)
+            src_test = torch.LongTensor(src_test)
+            dst_train = torch.LongTensor(dst_train)
+            dst_test = torch.LongTensor(dst_test)
+            labels_train = torch.FloatTensor(labels_train)
+            labels_test = torch.FloatTensor(labels_test)
+            if not os.path.exists(os.path.dirname(task_data_path)):
+                os.mkdir(os.path.dirname(task_data_path))
+            with open(task_data_path, 'wb') as f:
+                pickle.dump([features, src_train, src_test, dst_train, dst_test, labels_train, labels_test], f)
+        else:
+            with open(task_data_path, 'rb') as f:
+                features, src_train, src_test, dst_train, dst_test, labels_train, labels_test = pickle.load(f)
+        return features, src_train, src_test, dst_train, dst_test, labels_train, labels_test
+
+    def load_k_context_path_train_data(self, K):
+        train_data_dict_path = os.path.join(self.train_data_path, "data_{}_length.pkl".format(K))
+        if not os.path.exists(self.train_data_path):
+            train_k_graph_dict = k_hop_neighbor(self.heter_graph, 2 * K,
+                                                self.data_config['primary_type'])  # Find 2K hop neighbors for trainning
+            if not os.path.exists(os.path.dirname(self.train_data_path)):
+                os.mkdir(os.path.dirname(self.train_data_path))
+            with open(train_data_dict_path, 'wb') as f:
+                pickle.dump(train_k_graph_dict, f)
+        else:
+            with open(train_data_dict_path, 'rb') as f:
+                train_k_graph_dict = pickle.load(f)
+        return train_k_graph_dict
+
+
+def k_hop_neighbor(g, K, primary_type):
+    '''
+    Return the K hop neighbors of primary graph
+    :param g: DGLHeteroGraph
+    :param K: K hop neighbors
+    :param primary_type:
+    :return: graph_dict (l-hop, l-hop neighbors graph) l in [0, K+1]
+    '''
+    ntype = g.ntypes
+    primary_type_id = ntype.index(primary_type)
+    graph_dict = {}
+
+    def set_attribute(x, y):
+        for key, value in y.items():
+            x[key] = value
+
+    def get_primary_subgraph(g, primary_type_id):
+        '''
+        Return primary l-hop neighbor graph from homogeneous graph
+        :param g: DGLHeteroGraph
+        :param primary_type_id:
+        :return: g: primary subgraph DGLGraph
+        '''
+        primary_edges = g.filter_edges(
+            lambda edges: (
+                torch.logical_and((edges.src['_TYPE'] == primary_type_id),
+                                  (edges.dst['_TYPE'] == primary_type_id))))  # Filter edges
+        src_nodes, dst_nodes = g.find_edges(primary_edges)  # Find src and dst nodes
+        # Change the nodes' id to local graph id
+        min_p = torch.min(torch.cat([src_nodes, dst_nodes]))
+        src = src_nodes - min_p
+        dst = dst_nodes - min_p
+        g = dgl.DGLGraph((src, dst), readonly=True)
+        return g
+
+    homo_g = dgl.to_homo(g)
+    raw_adj = homo_g.adj(scipy_fmt='csr')
+    adj_k = 1
+    for l in range(K + 1):
+        print("Prcessing {} hop neighbors graph...".format(l))
+        adj_k = adj_k * raw_adj
+        new_g = dgl.graph(adj_k)
+        set_attribute(new_g.ndata, homo_g.ndata)  # Set attributes for all the node, node.data['_TYPE]= node type in HIN
+        g = get_primary_subgraph(new_g, primary_type_id)  #
+        graph_dict[l] = g
+    return graph_dict
+
+
+def load_acm_raw(data_config, remove_self_loop):
+    assert not remove_self_loop
+    data_path = os.path.join(data_config['data_path'], data_config['dataset'], 'ACM.mat')
+    train_data_path = os.path.join(data_config['data_path'], data_config['dataset'], 'train_data',
+                                   'data_{}_length.pkl'.format(data_config['k_length']))
+    task_data_path = os.path.join(data_config['data_path'], data_config['dataset'], data_config['task'], 'data.pkl')
+    data = sio.loadmat(data_path)
+    '''
+    ['__header__', '__version__', '__globals__', 'TvsP', 'PvsA', 'PvsV', 'AvsF', 'VvsC', 'PvsL', 'PvsC', 'A', 'C', 'F', 'L', 'P', 'T', 'V', 'PvsT', 'CNormPvsA', 'RNormPvsA', 'CNormPvsC', 'RNormPvsC', 'CNormPvsT', 'RNormPvsT', 'CNormPvsV', 'RNormPvsV', 'CNormVvsC', 'RNormVvsC', 'CNormAvsF', 'RNormAvsF', 'CNormPvsL', 'RNormPvsL', 'stopwords', 'nPvsT', 'nT', 'CNormnPvsT', 'RNormnPvsT', 'nnPvsT', 'nnT', 'CNormnnPvsT', 'RNormnnPvsT', 'PvsP', 'CNormPvsP', 'RNormPvsP']
+    P: Paper
+    A：Author
+    F: Facility
+    C: Conference
+    L: Subject
+    '''
+    p_vs_l = data['PvsL']  # paper-Subject
+    p_vs_p = data['PvsP']  # paper-paper
+    p_vs_a = data['PvsA']  # paper-author
+    a_vs_f = data['AvsF']  # author-facility
+    p_vs_t = data['PvsT']  # paper-term, bag of words, used for feature
+    p_vs_c = data['PvsC']  # paper-conference, labels come from that
+
+    hg = dgl.heterograph({
+        ('p', 'pa', 'a'): p_vs_a,
+        ('a', 'ap', 'p'): p_vs_a.transpose(),
+        ('p', 'pp', 'p'): p_vs_p,
+        ('p', 'ps', 's'): p_vs_l,
+        ('s', 'sp', 'p'): p_vs_l.transpose(),
+        ('a', 'af', 'f'): a_vs_f,
+        ('f', 'fa', 'a'): a_vs_f.transpose(),
+    })
+    print(hg.canonical_etypes)
+    if data_config['resample'] or not os.path.exists(train_data_path):
+        train_k_graph_dict = k_hop_neighbor(hg, 2 * data_config['k_length'],
+                                            data_config['primary_type'])  # Find 2K hop neighbors for trainning
+        if not os.path.exists(os.path.dirname(train_data_path)):
+            os.mkdir(os.path.dirname(train_data_path))
+        with open(train_data_path, 'wb') as f:
+            pickle.dump(train_k_graph_dict, f)
+    else:
+        with open(train_data_path, 'rb') as f:
+            train_k_graph_dict = pickle.load(f)
+    # Draw the metagraph using graphviz.
+    # import pygraphviz as pgv
+    # def plot_graph(nxg):
+    #     ag = pgv.AGraph(strict=False, directed=True)
+    #     for u, v, k in nxg.edges(keys=True):
+    #         ag.add_edge(u, v, label=k)
+    #     ag.layout('dot')
+    #     ag.draw('graph.png')
+    #
+    # plot_graph(G.metagraph)
+    task = data_config['task']
+    # Node Classification
+    if task == 'CF':
+        if data_config['resample'] or not os.path.exists(task_data_path):
+            # We assign
+            # (1) KDD papers as class 0 (data mining),
+            # (2) SIGMOD and VLDB papers as class 1 (database),
+            # (3) SIGCOMM and MOBICOMM papers as class 2 (communication)
+            conf_ids = [0, 1, 9, 10, 13]
+            label_ids = [0, 1, 2, 2, 1]
+            p_selected = p_vs_c[:, conf_ids].tocoo().row
+
+            features = torch.FloatTensor(p_vs_t.toarray())  # Feature
+
+            labels = p_vs_c.indices
+            for conf_id, label_id in zip(conf_ids, label_ids):
+                labels[label_ids == conf_id] = label_id
+            labels = torch.LongTensor(labels)
+
+            num_classes = 3
+
+            train_idx, test_idx = train_test_split(p_selected, test_size=data_config['test_ratio'],
+                                                   random_state=data_config['random_seed'])
+            train_idx = torch.LongTensor(train_idx)
+            test_idx = torch.LongTensor(test_idx)
+            with open(task_data_path, 'wb') as f:
+                pickle.dump([features, labels, num_classes, train_idx, test_idx], f)
+
+        else:
+            with open(task_data_path, 'rb') as f:
+                features, labels, num_classes, train_idx, test_idx = pickle.load(f)
+
+        return hg, train_k_graph_dict, features, labels, num_classes, train_idx, test_idx
+    # Links Prediction
+    elif task == 'LP':
+        if data_config['resample'] or not os.path.exists(task_data_path):
+            primary_graph = hg.node_type_subgraph(data_config['primary_type'])
+            g = dgl.DGLGraph(primary_graph.to_networkx(), readonly=True)
+            edgesampler = dgl.contrib.sampling.EdgeSampler(g, batch_size=g.number_of_edges(), num_workers=8,
+                                                           negative_mode='tail',
+                                                           neg_sample_size=1, exclude_positive=True)
+            src_data = []
+            dst_data = []
+            labels = []
+            for pos_g, neg_g in edgesampler:
+                pos_edges = pos_g.edges()
+                neg_edges = neg_g.edges()
+                src_data.extend(pos_edges[0].tolist())
+                dst_data.extend(pos_edges[1].tolist())
+                labels.extend([1] * len(pos_edges[0]))
+
+                src_data.extend(neg_edges[0].tolist())
+                dst_data.extend(neg_edges[1].tolist())
+                labels.extend([0] * len(neg_edges[0]))
+                break
+
+            src_train, src_test, dst_train, dst_test, labels_train, labels_test = train_test_split(src_data, dst_data,
+                                                                                                   labels,
+                                                                                                   test_size=
+                                                                                                   data_config[
+                                                                                                       'test_ratio'],
+                                                                                                   random_state=
+                                                                                                   data_config[
+                                                                                                       'random_seed'])
+            features = torch.FloatTensor(p_vs_t.toarray())  # Feature
+            src_train = torch.LongTensor(src_train)
+            src_test = torch.LongTensor(src_test)
+            dst_train = torch.LongTensor(dst_train)
+            dst_test = torch.LongTensor(dst_test)
+            labels_train = torch.FloatTensor(labels_train)
+            labels_test = torch.FloatTensor(labels_test)
+            if not os.path.exists(os.path.dirname(task_data_path)):
+                os.mkdir(os.path.dirname(task_data_path))
+            with open(task_data_path, 'wb') as f:
+                pickle.dump([features, src_train, src_test, dst_train, dst_test, labels_train, labels_test], f)
+        else:
+            with open(task_data_path, 'rb') as f:
+                features, src_train, src_test, dst_train, dst_test, labels_train, labels_test = pickle.load(f)
+        return hg, train_k_graph_dict, features, src_train, src_test, dst_train, dst_test, labels_train, labels_test
+    # Cluster
+    elif task == 'CL':
+        return hg
+    else:
+        return NotImplementedError('Unsupported task {}'.format(task))
+
+
+def load_data(data_config, remove_self_loop=False):
+    dataset = data_config['dataset']
+    if dataset == 'ACM':
+        return ACMDataLoader(data_config, remove_self_loop)
+    else:
+        return NotImplementedError('Unsupported dataset {}'.format(dataset))
