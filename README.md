@@ -4,6 +4,8 @@
 
 Official code implementation for CIKM 21 paper Detecting Communities from Heterogeneous Graphs: A Context Path-based Graph Neural Network Model
 
+> Linhao Luo, Yixiang Fang, Xin Cao, Xiaofeng Zhang, Wenjie Zhang. Detecting Communities from Heterogeneous Graphs: A Context Path-based Graph Neural Network Model. ACM Conference on Information and Knowledge Management (CIKM), 2021.
+
 ## Environments
 
 python == 3.6
