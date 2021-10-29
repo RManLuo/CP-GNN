@@ -15,7 +15,7 @@ data_config = {
     'dataset': 'ACM',
     'data_name': 'ACM.mat',
     'primary_type': 'p',
-    'task': 'CF',
+    'task': ['CF', 'CL'],
     'K_length': 4,
     'resample': False,
     'random_seed': 123,
@@ -60,6 +60,7 @@ train_config = {
 
 evaluate_config = {
     'method': 'LR',
+    'save_heat_map': True,
     'result_path': os.path.join('result', data_config['dataset']),
     'random_state': 123,
     'max_iter': 500,

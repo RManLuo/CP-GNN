@@ -61,6 +61,7 @@ train_config = {
 
 evaluate_config = {
     'method': 'LR',
+    'save_heat_map': True,
     'result_path': os.path.join('result', data_config['dataset']),
     'random_state': 123,
     'max_iter': 500,
