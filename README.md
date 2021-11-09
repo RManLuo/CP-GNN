@@ -4,7 +4,7 @@
 
 Official code implementation for CIKM 21 paper Detecting Communities from Heterogeneous Graphs: A Context Path-based Graph Neural Network Model
 
-> Linhao Luo, Yixiang Fang, Xin Cao, Xiaofeng Zhang, Wenjie Zhang. Detecting Communities from Heterogeneous Graphs: A Context Path-based Graph Neural Network Model. ACM Conference on Information and Knowledge Management (CIKM), 2021.
+> Linhao Luo, Yixiang Fang, Xin Cao, Xiaofeng Zhang, and Wenjie Zhang. 2021. Detecting Communities from Heterogeneous Graphs: A Context Path-based Graph Neural Network Model. In Proceedings of the 30th ACM International Conference on Information & Knowledge Management (CIKM '21). Association for Computing Machinery, New York, NY, USA, 1170–1180. DOI:https://doi.org/10.1145/3459637.3482250
 
 ## Environments
 
@@ -102,4 +102,24 @@ evaluate_config = {
 ## Train and Evaluate
 ``` bash
 python3 main.py
+```
+
+## BibTex
+```tex
+@inproceedings{10.1145/3459637.3482250,
+author = {Luo, Linhao and Fang, Yixiang and Cao, Xin and Zhang, Xiaofeng and Zhang, Wenjie},
+title = {Detecting Communities from Heterogeneous Graphs: A Context Path-Based Graph Neural Network Model},
+year = {2021},
+isbn = {9781450384469},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3459637.3482250},
+doi = {10.1145/3459637.3482250},
+booktitle = {Proceedings of the 30th ACM International Conference on Information & Knowledge Management},
+pages = {1170–1180},
+numpages = {11},
+keywords = {unsupervised learning, graph neural network, community detection, heterogeneous graphs, context path},
+location = {Virtual Event, Queensland, Australia},
+series = {CIKM '21}
+}
 ```
